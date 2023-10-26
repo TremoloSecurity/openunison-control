@@ -19,7 +19,7 @@ This command will deploy a stand-alone OpenUnison instance.  It can deploy as bo
   -t, --smtp-secret-path string               Path to file containing the smtp password`
 ```
 
-If run on an existing cluster, this command will upgrade existing charts.  For authentication soltuions that require a secret, this command can be re-run without that secret safely.  
+If run on an existing cluster, this command will upgrade existing charts.  For authentication solutions that require a secret, this command can be re-run without that secret safely.
 
 ## install-satelite
 
