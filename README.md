@@ -4,7 +4,9 @@ This utility automates the deployment of OpenUnison's helm charts into your clus
 
 ## install-auth-portal
 
-This command will deploy a stand-alone OpenUnison instance. It can deploy as both an [authentication portal](https://openunison.github.io/) and as a [Namespace as a Service (NaaS) portal](https://openunison.github.io/namespace_as_a_service/). Prior to running this command, a values.yaml file will need to be created. It is the only required argument for this command. Optional flags:
+The `ouctl install-auth-portal` command will deploy a stand-alone OpenUnison instance. It can deploy as both an [authentication portal](https://openunison.github.io/) and as a [Namespace as a Service (NaaS) portal](https://openunison.github.io/namespace_as_a_service/). Prior to running this command, a `values.yaml` file will need to be created. It is the only required argument for this command.
+
+Optional flags are:
 
 ```
   -m, --cluster-management-chart string       Helm chart for enabling cluster management (default "tremolo/openunison-k8s-cluster-management")
@@ -19,7 +21,7 @@ This command will deploy a stand-alone OpenUnison instance. It can deploy as bot
   -t, --smtp-secret-path string               Path to file containing the smtp password`
 ```
 
-If run on an existing cluster, this command will upgrade existing charts. For authentication solutions that require a secret, this command can be re-run without that secret safely.
+If run this command on a cluster with an existing OpenUnison instance, it will upgrade the existing charts. For authentication solutions that require a secret, this command can be re-run without that secret safely.
 
 ## install-satelite
 
