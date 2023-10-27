@@ -1,6 +1,6 @@
 # ouctl
 
-This utility automates the deployment of OpenUnison's helm charts into your cluster. It has helm built in, so it doesn't need to use an external helm binary. It has two commands, one for deploying a stand-alone OpenUnison instance and one for deploying a satelite instance. Prior to using this tool, refer to the [OpenUnison deployment guide](https://openunison.github.io/deployauth/) for instructions on how to configure OpenUnison's values.yaml.
+This utility automates the deployment of OpenUnison's helm charts into your cluster. It has helm built in, so it doesn't need to use an external helm binary. It has two commands, one for deploying a stand-alone OpenUnison instance and one for deploying a satelite instance. Prior to using this tool, refer to the [OpenUnison deployment guide](https://openunison.github.io/deployauth/) for instructions on how to configure OpenUnison's `values.yaml`.
 
 ## install-auth-portal
 
