@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
+
+	"helm.sh/helm/v3/pkg/registry"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -82,11 +85,16 @@ type OpenUnisonDeployment struct {
 	preCharts        []HelmChartInfo
 
 	namespaceLabels map[string]string
+
+	cpOrchestraName string
+	cpSecretName    string
+
+	skipCpIntegration bool
 }
 
 // creates a new deployment structure
 func NewOpenUnisonDeployment(namespace string, operatorChart string, orchestraChart string, orchestraLoginPortalChart string, pathToValuesYaml string, secretFile string, clusterManagementChart string, pathToDbPassword string, pathToSmtpPassword string, skipClusterManagement bool, additionalCharts []HelmChartInfo, preCharts []HelmChartInfo, namespaceLabels map[string]string) (*OpenUnisonDeployment, error) {
-	ou, err := NewSateliteDeployment(namespace, operatorChart, orchestraChart, orchestraLoginPortalChart, pathToValuesYaml, secretFile, "", "", "", "", additionalCharts, preCharts, namespaceLabels)
+	ou, err := NewSateliteDeployment(namespace, operatorChart, orchestraChart, orchestraLoginPortalChart, pathToValuesYaml, secretFile, "", "", "", "", additionalCharts, preCharts, namespaceLabels, "orchestra", "orchestra-secrets-source", false)
 
 	if err != nil {
 		return nil, err
@@ -101,7 +109,7 @@ func NewOpenUnisonDeployment(namespace string, operatorChart string, orchestraCh
 }
 
 // creates a new deployment structure
-func NewSateliteDeployment(namespace string, operatorChart string, orchestraChart string, orchestraLoginPortalChart string, pathToValuesYaml string, secretFile string, controlPlanContextName string, sateliteContextName string, addClusterChart string, pathToSateliteYaml string, additionalCharts []HelmChartInfo, preCharts []HelmChartInfo, namespaceLabels map[string]string) (*OpenUnisonDeployment, error) {
+func NewSateliteDeployment(namespace string, operatorChart string, orchestraChart string, orchestraLoginPortalChart string, pathToValuesYaml string, secretFile string, controlPlanContextName string, sateliteContextName string, addClusterChart string, pathToSateliteYaml string, additionalCharts []HelmChartInfo, preCharts []HelmChartInfo, namespaceLabels map[string]string, cpOrchestraName string, cpSecretName string, skipCpIntegration bool) (*OpenUnisonDeployment, error) {
 	ou := &OpenUnisonDeployment{}
 
 	ou.namespace = namespace
@@ -134,6 +142,10 @@ func NewSateliteDeployment(namespace string, operatorChart string, orchestraChar
 	}
 
 	ou.namespaceLabels = namespaceLabels
+
+	ou.cpOrchestraName = cpOrchestraName
+	ou.cpSecretName = cpSecretName
+	ou.skipCpIntegration = skipCpIntegration
 
 	return ou, nil
 }
@@ -452,7 +464,7 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 		return fmt.Errorf("k8s_cluster_name must be defined in the satalite values.yaml")
 	}
 
-	satelateReleaseName := "satelite-" + clusterName
+	satelateReleaseName := "satellite-" + clusterName
 
 	settings := cli.New()
 	actionConfig := new(action.Configuration)
@@ -474,10 +486,18 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 		}
 	}
 
-	ouSecret, err := ou.clientset.CoreV1().Secrets(ou.namespace).Get(context.TODO(), "orchestra-secrets-source", metav1.GetOptions{})
-
+	ouSecret, err := ou.clientset.CoreV1().Secrets(ou.namespace).Get(context.TODO(), ou.cpSecretName, metav1.GetOptions{})
+	foundSecret := false
 	if err != nil {
-		return err
+		ouSecret = &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      ou.cpSecretName,
+				Namespace: ou.namespace,
+			},
+			Data: map[string][]byte{},
+		}
+	} else {
+		foundSecret = true
 	}
 
 	sateliteClientSecret, ok := ouSecret.Data["cluster-idp-"+clusterName]
@@ -486,7 +506,16 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 		fmt.Println("SSO Client Secret doesn't exist, creating")
 		ou.secret = string(randSeq((64)))
 		ouSecret.Data["cluster-idp-"+clusterName] = []byte(ou.secret)
-		ou.clientset.CoreV1().Secrets(ou.namespace).Update(context.TODO(), ouSecret, metav1.UpdateOptions{})
+
+		if foundSecret {
+			ou.clientset.CoreV1().Secrets(ou.namespace).Update(context.TODO(), ouSecret, metav1.UpdateOptions{})
+		} else {
+			_, err = ou.clientset.CoreV1().Secrets(ou.namespace).Create(context.TODO(), ouSecret, metav1.CreateOptions{})
+			if err != nil {
+				return err
+			}
+		}
+
 		fmt.Println("Created")
 	} else {
 		fmt.Println("SSO client secret already created, retrieving")
@@ -526,7 +555,7 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 
 	fmt.Printf("OpenUnison CRD Version : %v\n", ouVersion)
 
-	respBytes, err = ou.clientset.RESTClient().Get().RequestURI("/apis/openunison.tremolo.io/" + ouVersion + "/namespaces/" + ou.namespace + "/openunisons/orchestra").DoRaw(context.TODO())
+	respBytes, err = ou.clientset.RESTClient().Get().RequestURI("/apis/openunison.tremolo.io/" + ouVersion + "/namespaces/" + ou.namespace + "/openunisons/" + ou.cpOrchestraName).DoRaw(context.TODO())
 	if err != nil {
 		return err
 	}
@@ -781,7 +810,14 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 					mgmtProxy["external_suffix"] = naasExternalSuffix
 				}
 
-				openunison["az_groups"] = azRules
+				// if there are pre-set az_groups, they should be honored
+
+				if openunison["az_groups"] != nil {
+					sateliteAzGroups := openunison["az_groups"].([]interface{})
+					openunison["az_groups"] = append(sateliteAzGroups, azRules...)
+				} else {
+					openunison["az_groups"] = azRules
+				}
 
 			}
 		}
@@ -795,9 +831,11 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 
 	ioutil.WriteFile(ou.pathToValuesYaml, dataToWrite, 0644)
 
-	shouldReturn, returnValue := ou.integrateSatelite(ou.helmValues, clusterName, err, sateliteIntegrated, actionConfig, satelateReleaseName, settings, nil, "", "", naasRoles)
-	if shouldReturn {
-		return returnValue
+	if !ou.skipCpIntegration {
+		shouldReturn, returnValue := ou.integrateSatelite(ou.helmValues, clusterName, err, sateliteIntegrated, actionConfig, satelateReleaseName, settings, nil, "", "", naasRoles)
+		if shouldReturn {
+			return returnValue
+		}
 	}
 
 	// deploy the satelte
@@ -820,63 +858,66 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 		return err
 	}
 
-	if naasEnabled && sateliteManagementEnabled {
-		// if the naas is enabled, need to deploy management
-		targetCert := ""
-		var trustedCerts []helmmodel.TrustedCertsInner
-		trustCertsJson, err := json.Marshal(ou.helmValues["trusted_certs"])
+	if !ou.skipCpIntegration {
+		if naasEnabled && sateliteManagementEnabled {
+			// if the naas is enabled, need to deploy management
+			targetCert := ""
+			var trustedCerts []helmmodel.TrustedCertsInner
+			trustCertsJson, err := json.Marshal(ou.helmValues["trusted_certs"])
 
-		if err != nil {
-			panic(err)
-		}
-
-		json.Unmarshal(trustCertsJson, &trustedCerts)
-
-		for _, trustedCert := range trustedCerts {
-			certName := trustedCert.Name
-			if certName == "unison-ca" {
-				targetCert = trustedCert.PemB64
+			if err != nil {
+				panic(err)
 			}
-		}
 
-		// trustedCerts, ok := ou.helmValues["trusted_certs"].([]interface{})
-		// if ok {
-		// 	for _, t := range trustedCerts {
-		// 		trustedCert := t.(map[string]interface{})
-		// 		certName := trustedCert["name"].(string)
-		// 		if certName == "unison-ca" {
-		// 			targetCert = trustedCert["pem_b64"].(string)
-		// 		}
-		// 	}
-		// }
+			json.Unmarshal(trustCertsJson, &trustedCerts)
 
-		if targetCert == "" {
-			// not found, load the ou-tls-certificate secret
-			tlsSecret, err := ou.clientset.CoreV1().Secrets(ou.namespace).Get(context.TODO(), "ou-tls-certificate", metav1.GetOptions{})
-			if err == nil {
-				targetCert = base64.StdEncoding.EncodeToString(tlsSecret.Data["tls.crt"])
+			for _, trustedCert := range trustedCerts {
+				certName := trustedCert.Name
+				if certName == "unison-ca" {
+					targetCert = trustedCert.PemB64
+				}
 			}
-		}
 
-		management := make(map[string]interface{})
-		management["enabled"] = true
-		target := make(map[string]interface{})
-		management["target"] = target
+			// trustedCerts, ok := ou.helmValues["trusted_certs"].([]interface{})
+			// if ok {
+			// 	for _, t := range trustedCerts {
+			// 		trustedCert := t.(map[string]interface{})
+			// 		certName := trustedCert["name"].(string)
+			// 		if certName == "unison-ca" {
+			// 			targetCert = trustedCert["pem_b64"].(string)
+			// 		}
+			// 	}
+			// }
 
-		target["url"] = managementProxyUrl
-		target["tokenType"] = "oidc"
-		target["useToken"] = true
+			if targetCert == "" {
+				// not found, load the ou-tls-certificate secret
+				tlsSecret, err := ou.clientset.CoreV1().Secrets(ou.namespace).Get(context.TODO(), "ou-tls-certificate", metav1.GetOptions{})
+				if err == nil {
+					targetCert = base64.StdEncoding.EncodeToString(tlsSecret.Data["tls.crt"])
+				}
+			}
 
-		if targetCert != "" {
-			target["base64_certificate"] = targetCert
-		}
+			management := make(map[string]interface{})
+			management["enabled"] = true
+			target := make(map[string]interface{})
+			management["target"] = target
 
-		// redeployment satelite integration
-		ou.setCurrentContext(ou.controlPlaneContextName)
-		ou.loadKubernetesConfiguration()
-		shouldReturn, returnValue := ou.integrateSatelite(ou.helmValues, clusterName, err, sateliteIntegrated, actionConfig, satelateReleaseName, settings, management, naasExternalSuffix, externalNaasGroupName, naasRoles)
-		if shouldReturn {
-			return returnValue
+			target["url"] = managementProxyUrl
+			target["tokenType"] = "oidc"
+			target["useToken"] = true
+
+			if targetCert != "" {
+				target["base64_certificate"] = targetCert
+			}
+
+			// redeployment satelite integration
+			ou.setCurrentContext(ou.controlPlaneContextName)
+			ou.loadKubernetesConfiguration()
+			shouldReturn, returnValue := ou.integrateSatelite(ou.helmValues, clusterName, err, sateliteIntegrated, actionConfig, satelateReleaseName, settings, management, naasExternalSuffix, externalNaasGroupName, naasRoles)
+			if shouldReturn {
+				return returnValue
+			}
+
 		}
 
 	}
@@ -886,7 +927,6 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 
 	fmt.Println(sateliteIntegrated)
 	fmt.Println(originalContextName)
-
 	return nil
 }
 
@@ -899,7 +939,8 @@ func (ou *OpenUnisonDeployment) integrateSatelite(helmValues map[string]interfac
 		  "parent": "%v",
 		  "sso": {
 			"enabled": true,
-			"inactivityTimeoutSeconds": 900
+			"inactivityTimeoutSeconds": 900,
+			"client_secret": "%v"
 		  },
 		  "hosts": {
 			"portal": "%v",
@@ -935,6 +976,7 @@ func (ou *OpenUnisonDeployment) integrateSatelite(helmValues map[string]interfac
 		clusterName,
 		clusterName,
 		parentOrg,
+		ou.cpSecretName,
 		sateliteNetwork["openunison_host"].(string),
 		sateliteNetwork["dashboard_host"].(string))
 
@@ -1083,6 +1125,10 @@ func (ou *OpenUnisonDeployment) runChartUpgrade(client *action.Upgrade, name str
 
 // set the secret
 func (ou *OpenUnisonDeployment) setupSecret(helmValues map[string]interface{}) error {
+	if ou.skipCpIntegration {
+		return nil
+	}
+
 	secret, err := ou.clientset.CoreV1().Secrets(ou.namespace).Get(context.TODO(), "orchestra-secrets-source", metav1.GetOptions{})
 	foundSecret := false
 	if err != nil {
@@ -1332,8 +1378,8 @@ func (ou *OpenUnisonDeployment) locateChart(configChartName string, chartPathOpt
 	chartName := configChartName
 	chartVersion := ""
 	if strings.Contains(configChartName, "@") {
-		chartName = ou.operator.chart[0:strings.Index(ou.operator.chart, "@")]
-		chartVersion = ou.operator.chart[strings.Index(ou.operator.chart, "@")+1:]
+		chartName = configChartName[0:strings.Index(configChartName, "@")]
+		chartVersion = configChartName[strings.Index(configChartName, "@")+1:]
 
 		fmt.Printf("Chart version specified for %s: %s\n", chartName, chartVersion)
 
@@ -1341,6 +1387,58 @@ func (ou *OpenUnisonDeployment) locateChart(configChartName string, chartPathOpt
 
 	} else {
 		fmt.Printf("No chart version specified for %s\n", chartName)
+	}
+
+	// Check if the chart is using OCI
+	if strings.HasPrefix(chartName, "oci://") {
+		fmt.Printf("OCI chart detected: %s\n", chartName)
+
+		// Step 1: Initialize OCI client
+		ociClient, err := registry.NewClient(
+			registry.ClientOptEnableCache(true),
+			registry.ClientOptDebug(true),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize OCI client: %v", err)
+		}
+
+		// Step 2: Create a temporary directory
+		tempDir, err := os.MkdirTemp("", "helm-oci-*")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temporary directory: %v", err)
+		}
+		fmt.Printf("Temporary directory created: %s\n", tempDir)
+
+		debugLog := func(format string, v ...interface{}) {
+			fmt.Printf(format+"\n", v...)
+		}
+
+		actionConfig := new(action.Configuration)
+		if err := actionConfig.Init(settings.RESTClientGetter(), "", os.Getenv("HELM_DRIVER"), debugLog); err != nil {
+			return nil, fmt.Errorf("failed to initialize Helm action configuration: %v", err)
+		}
+
+		actionConfig.RegistryClient = ociClient
+
+		// Step 3: Pull the chart from the OCI registry
+		pull := action.NewPullWithOpts(action.WithConfig(actionConfig))
+		pull.DestDir = tempDir
+		pull.Version = chartVersion
+		pull.Settings = &cli.EnvSettings{}
+
+		_, err = pull.Run(chartName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pull OCI chart %s: %v", chartName, err)
+		}
+
+		// Step 4: Load the chart from the temporary directory
+		chartFilePath := filepath.Join(tempDir, filepath.Base(chartName)+"-"+chartVersion+".tgz")
+		chartReq, err := loader.Load(chartFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load OCI chart from %s: %v", chartFilePath, err)
+		}
+
+		return chartReq, nil
 	}
 
 	cp, err := chartPathOptions.LocateChart(chartName, settings)
