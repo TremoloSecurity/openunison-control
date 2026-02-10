@@ -7,6 +7,9 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
+      - name: Enable debug
+        run: |
+          echo "ACTIONS_STEP_DEBUG=true" >> $GITHUB_ENV
       - uses: actions/checkout@v2
       - uses: actions/setup-go@v3
         with:
