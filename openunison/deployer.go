@@ -35,6 +35,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/registry"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
@@ -857,7 +858,11 @@ func (ou *OpenUnisonDeployment) DeployOpenUnisonSatelite() error {
 
 				if naasGroupsExternal {
 					azRules = append(azRules, fmt.Sprintf("k8s-cluster-k8s-%v-administrators%v", clusterName, naasExternalSuffix))
-					externalNaasGroupName = mgmtProxy["external_admin_group"].(string)
+					externalNaasGroupName = ""
+					if s, ok := mgmtProxy["external_admin_group"].(string); ok {
+						externalNaasGroupName = s
+					}
+
 					mgmtProxy["external_suffix"] = naasExternalSuffix
 				}
 
@@ -1911,6 +1916,11 @@ func waitForDeployment(ou *OpenUnisonDeployment, deploymentName string) error {
 		dep, err := ou.clientset.AppsV1().Deployments(ou.namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// deployment does not exist
+				fmt.Printf("Deployment %s not found, assume it wasn't deployed and will not wait for the pods to be ready\n", deploymentName)
+				return nil
+			}
 			return err
 		}
 
